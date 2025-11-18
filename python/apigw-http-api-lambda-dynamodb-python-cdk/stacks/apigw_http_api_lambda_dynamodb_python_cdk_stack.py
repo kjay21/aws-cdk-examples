@@ -4,11 +4,14 @@
 import os
 from aws_cdk import (
     Stack,
+    RemovalPolicy,
     aws_dynamodb as dynamodb_,
     aws_lambda as lambda_,
     aws_apigateway as apigw_,
     aws_ec2 as ec2,
     aws_iam as iam,
+    aws_logs as logs,
+    aws_cloudtrail as cloudtrail,
     Duration,
 )
 from constructs import Construct
@@ -67,6 +70,23 @@ class ApigwHttpApiLambdaDynamodbPythonCdkStack(Stack):
             ),
         )
 
+        # Create CloudWatch Log Groups with retention
+        lambda_log_group = logs.LogGroup(
+            self,
+            "ApiHandlerLogGroup",
+            log_group_name="/aws/lambda/apigw_handler",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
+        api_log_group = logs.LogGroup(
+            self,
+            "ApiGatewayAccessLogs",
+            log_group_name="/aws/apigateway/access-logs",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
         # Create the Lambda function to receive the request
         api_hanlder = lambda_.Function(
             self,
@@ -82,11 +102,29 @@ class ApigwHttpApiLambdaDynamodbPythonCdkStack(Stack):
             memory_size=1024,
             timeout=Duration.minutes(5),
             tracing=lambda_.Tracing.ACTIVE,
+            log_group=lambda_log_group,
         )
 
         # grant permission to lambda to write to demo table
         demo_table.grant_write_data(api_hanlder)
         api_hanlder.add_environment("TABLE_NAME", demo_table.table_name)
+
+        # Create CloudTrail for DynamoDB data events
+        trail = cloudtrail.Trail(
+            self,
+            "DynamoDBDataEventsTrail",
+            trail_name="dynamodb-data-events",
+            include_global_service_events=False,
+            is_multi_region_trail=False,
+            enable_file_validation=True
+        )
+
+        trail.add_event_selector(
+            read_write_type=cloudtrail.ReadWriteType.ALL,
+            include_management_events=False,
+            data_resource_type=cloudtrail.DataResourceType.DYNAMO_DB_TABLE,
+            data_resource_values=[demo_table.table_arn]
+        )
 
         # Create API Gateway
         apigw_.LambdaRestApi(
@@ -94,6 +132,18 @@ class ApigwHttpApiLambdaDynamodbPythonCdkStack(Stack):
             "Endpoint",
             handler=api_hanlder,
             deploy_options=apigw_.StageOptions(
-                tracing_enabled=True
+                tracing_enabled=True,
+                access_log_destination=apigw_.LogGroupLogDestination(api_log_group),
+                access_log_format=apigw_.AccessLogFormat.json_with_standard_fields(
+                    caller=True,
+                    http_method=True,
+                    ip=True,
+                    protocol=True,
+                    request_time=True,
+                    resource_path=True,
+                    response_length=True,
+                    status=True,
+                    user=True
+                )
             )
         )
